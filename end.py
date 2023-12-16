@@ -546,10 +546,9 @@ def login(data):
         return False
     result = db.session.query(Account).filter_by(username=data['username'], password=data['password'],
                                                  role=role).one_or_none()
-    print(data)
     if result is None:
         return False
-    return {'token': result.accountID}
+    return {'token': result.username}
 
 
 @app.route('/room/create', methods=['POST'])
@@ -641,7 +640,7 @@ def room_get(token, roomName=None):
     :param roomName: 房间号 (不填则根据客户信息自动导航)
     :return:
     """
-    account_request = db.session.query(Account).filter_by(accountID=token).one()
+    account_request = db.session.query(Account).filter_by(username=token).one()
     room, role_request = account_request.room, account_request.role
     if role_request != Role.manager and roomName is not None:
         abort(404, "only manager can visit other rooms")
@@ -653,7 +652,7 @@ def room_get(token, roomName=None):
 
     require_details = '/details/' in request.path
     roomInfo = room_info(room, require_details=require_details, for_manager=role_request == Role.manager)
-    return jsonify(roomInfo=roomInfo), 200
+    return roomInfo
 
 
 def room_post(data, token, roomName=None):
@@ -679,7 +678,7 @@ def room_post(data, token, roomName=None):
     :param roomName: 房间号 (不填则根据客户信息自动导航)
     :return:
     """
-    account_request = db.session.query(Account).filter_by(accountID=token).one()
+    account_request = db.session.query(Account).filter_by(username=token).one()
     room, role_request = account_request.room, account_request.role
     if role_request != Role.manager and roomName is not None:
         abort(404, "only manager can visit other rooms")
@@ -720,7 +719,7 @@ def get_rooms(token):
     查看所有房间状态
     :return:
     """
-    role_request = db.session.query(Account).filter_by(accountID=token).one().role
+    role_request = db.session.query(Account).filter_by(username=token).one().role
     if role_request == Role.customer:
         abort(401, "Unauthorized")
     rooms = db.session.query(Room).all()
@@ -829,12 +828,12 @@ class log_data():
             self.identify = self.verification = False
             return None, None
         token = response['token']
-        lst = get_rooms(token)
+        lst = get_rooms('222')
         room_id = None
+        print(lst)
         for dict in lst:
             if dict['customerSessionID'] == data['username']:
                 room_id = dict['roomName']
-        print(token, room_id)
         return token, room_id
 
 
@@ -853,11 +852,9 @@ class hotel_data():
         return self.username
 
     def update_ac(self, room_id, input, token):
-        headers = {
-            'Authorization': 'Bearer ' + token
-        }
         input_data = {}
         data = room_get(token=token)
+        print(data)
         if data['queueState'] == 'IDLE':
             data['acState'] = False
         elif data['queueState'] == 'PENDING' or data['queueState'] == 'RUNNING':
@@ -873,7 +870,7 @@ class hotel_data():
             else:
                 input_data[key] = value
         print(input_data)
-        response = room_post(data=input_data, token=headers)
+        response = room_post(data=input_data, token=token)
         if response:
             print('更新成功')
         return data['roomTemperature']
