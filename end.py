@@ -29,30 +29,28 @@ db = SQLAlchemy(app)
 
 class ACScheduler:
     def __init__(self, db, interval=1):
-        # 初始化空调调度器
-        self.db = db  # 数据库连接
-        self.interval = interval  # 调度更新时间间隔（以秒为单位）
-        self.max_num = 3  # 最大同时运行的空调数量
-        self.running_list = []  # 正在运行的空调列表
-        self.waiting_queue = []  # 等待队列，存放等待运行的空调
-        self.last_update = time.time()  # 上次调度更新时间
-        self.cooling_rate = 0.5 / 60  # 房间回温速率（每分钟）
-        self.rate = 1.  # 空调费率（每单位温度改变的费用）
+        self.db = db
+        self.interval = interval
+        self.max_num = 3
+        self.running_list = []
+        self.waiting_queue = []
+        self.last_update = time.time()
+        self.cooling_rate = 0.5/60
+        self.rate = 1.  # 空调费率
 
-        self.boost = 6.  # 空调性能提升系数
+        self.boost = 6.
 
     def minimum(self, a1, a2):
-        # 返回两个数的最小值和索引（0表示第一个数最小，1表示第二个数最小）
         return (a1, 0) if a1 < a2 else (a2, 1)
 
     def get_speed(self, fanSpeed):
-        # 根据风扇速度返回每分钟的温度改变速率
+        # 每分钟改变：
         if fanSpeed == FanSpeed.HIGH:
             return 1.
         elif fanSpeed == FanSpeed.MEDIUM:
             return 0.5
         else:
-            return 1 / 3
+            return 1/3
 
     def remove_from_lists(self, room):
         if room.roomID in self.running_list:
@@ -76,55 +74,52 @@ class ACScheduler:
                     db.session.commit()
 
     def get_priority(self, acSpeed):
-        # 根据空调速度返回优先级（高速度优先级最低）
         return {'high': 1, 'medium': 2, 'low': 3}.get(acSpeed.value, 3)
 
     def add_to_waiting(self, room):
-        # 将房间添加到等待队列中
         room.queueState = QueueState.PENDING
         db.session.commit()
-        # 将房间信息添加到等待队列，并根据优先级和随机值排序
-        # self.waiting_queue = [(priority, random.random(), room_id) for priority, random_val, room_id in
-        #                       self.waiting_queue]
-        heapq.heappush(self.waiting_queue, (self.get_priority(room.fanSpeed), random.random(), room.roomID))
+        # self.waiting_queue = [(priority, t, room_id) for priority, t, room_id in self.waiting_queue]
+        heapq.heappush(self.waiting_queue, (self.get_priority(room.fanSpeed), time.time(), room.roomID))
         if room.roomID in self.running_list:
             self.running_list.remove(room.roomID)
-        # 在这里产生详单记录（未提供代码示例）
+        # 在这里产生详单记录
 
     def update(self):
-        # 更新空调调度状态
         with app.app_context():
             t = time.time()
+
+            # records = db.session.query(RoomRecord).all()
+            # print("records: ", len(records))
 
             rooms = self.db.session.query(Room).all()
             for room in rooms:
                 if room.queueState == QueueState.RUNNING:  # 空调开启时
-                    if room.roomTemperature > room.acTemperature:  # 制冷
-                        delta, argmin = self.minimum(room.roomTemperature - room.acTemperature,
-                                                     self.get_speed(room.fanSpeed) * (
-                                                             t - self.last_update) / 60 * self.boost)
+                    if room.roomTemperature > room.acTemperature:  # cooling
+                        delta, argmin = self.minimum(room.roomTemperature - room.acTemperature, self.get_speed(room.fanSpeed) * (t - self.last_update) / 60 * self.boost)
                         if argmin == 0:
-                            self.add_to_waiting(room)
+                            self.add_to_waiting(room)  # 到达目标温度而暂停
+                            self.generate_record(room)  # 因到达目标温度产生详单记录
                         room.roomTemperature -= delta
                         room.consumption += delta * self.rate
                         db.session.commit()
-                    elif room.roomTemperature < room.acTemperature:  # 制热
-                        delta, argmin = self.minimum(room.acTemperature - room.roomTemperature,
-                                                     self.get_speed(room.fanSpeed) * (
-                                                             t - self.last_update) / 60 * self.boost)
+                    elif room.roomTemperature < room.acTemperature:  # heating
+                        delta, argmin = self.minimum(room.acTemperature - room.roomTemperature, self.get_speed(room.fanSpeed) * (t - self.last_update) / 60 * self.boost)
                         if argmin == 0:
-                            self.add_to_waiting(room)
+                            self.add_to_waiting(room)  # 到达目标温度而暂停
+                            self.generate_record(room)  # 因到达目标温度产生详单记录
                         room.roomTemperature += delta
                         room.consumption += delta * self.rate
                         db.session.commit()
                     else:
-                        self.add_to_waiting(room)  # 达到目标温度回到等待队列
+                        self.add_to_waiting(room)  # 到达目标温度而暂停
+                        self.generate_record(room)  # 因到达目标温度产生详单记录
             # print(self.running_list, self.waiting_queue)
 
             for roomID in self.running_list:
                 room = db.session.query(Room).filter_by(roomID=roomID).one()
                 # print(datetime.now() - room.firstRuntime)
-                if datetime.now() - room.firstRuntime > timedelta(minutes=2) / self.boost:  # 2分钟 / 6（性能提升系数）
+                if datetime.now() - room.firstRuntime > timedelta(minutes=2) / self.boost:  # 2min / 6
                     print('over time!')
                     self.add_to_waiting(room)  # 超时而暂停
                     self.generate_record(room)  # 因超时暂停产生详单记录
@@ -132,13 +127,9 @@ class ACScheduler:
             for room in rooms:
                 if room.queueState != QueueState.RUNNING:  # 空调关闭时
                     if room.roomTemperature > room.initialTemperature:  # 房间的回温逻辑
-                        room.roomTemperature = max(
-                            room.roomTemperature - self.cooling_rate * (t - self.last_update) * self.boost,
-                            room.initialTemperature)
+                        room.roomTemperature = max(room.roomTemperature - self.cooling_rate * (t - self.last_update) * self.boost, room.initialTemperature)
                     else:
-                        room.roomTemperature = min(
-                            room.roomTemperature + self.cooling_rate * (t - self.last_update) * self.boost,
-                            room.initialTemperature)
+                        room.roomTemperature = min(room.roomTemperature + self.cooling_rate * (t - self.last_update) * self.boost, room.initialTemperature)
                     db.session.commit()
 
             while self.waiting_queue and len(self.running_list) < self.max_num:
@@ -153,18 +144,14 @@ class ACScheduler:
             self.last_update = t
 
     def generate_record(self, room):
-        print(room)
         latest_settings = db.session.query(Setting).order_by(Setting.createTime.desc()).first()
-        print(latest_settings)
         record = RoomRecord(room.roomID, room.customerSessionID, room.requestTime, room.startTimePoint, datetime.now(), room.fanSpeed, room.acMode, latest_settings.rate, room.consumption - room.lastConsumption, room.consumption)
-        print(room.roomID, room.customerSessionID, room.requestTime, room.startTimePoint, datetime.now(), room.fanSpeed, room.acMode, latest_settings.rate, room.consumption - room.lastConsumption, room.consumption)
         room.lastConsumption = room.consumption
-        print(room.lastConsumption,'?')
         db.session.add(record)
         db.session.commit()
 
     def turn_off(self, room):
-        # 将房间的状态从PENDING/RUNNING切换到IDLE（关闭空调）
+        # PENDING/RUNNING -> IDLE
         room.queueState = QueueState.IDLE
         db.session.commit()
         self.remove_from_lists(room)
@@ -172,7 +159,7 @@ class ACScheduler:
         print('turn off!', room.queueState, self.running_list, self.waiting_queue)
 
     def turn_on(self, room):
-        # 将房间的状态从IDLE切换到PENDING（打开空调）
+        # IDLE -> PENDING
         in_waiting = False
         for p, t, id, in self.waiting_queue:
             if id == room.roomID:
@@ -185,7 +172,7 @@ class ACScheduler:
 
     def schedule_wrapper(self):
         try:
-            self.update()  # 调用 调度函数
+            self.update()
         finally:
             # 安排下一次执行
             threading.Timer(self.interval, self.schedule_wrapper).start()
@@ -195,6 +182,7 @@ class ACScheduler:
 
 
 scheduler = ACScheduler(db)
+
 scheduler.start()
 
 
@@ -284,7 +272,6 @@ class Room(db.Model):
         self.lastConsumption = 0.0
 
 
-
 class RoomRecord(db.Model):
     __tablename__ = 'room_records'
     id = Column(Integer, primary_key=True)
@@ -340,10 +327,45 @@ class Setting(db.Model):
 with app.app_context():
     db.create_all()
 
-    # 检查并添加 Room
     existing_room = Room.query.filter_by(roomName='211').first()
     if not existing_room:
-        room = Room('211', '大床房', 300, 25, FanSpeed.MEDIUM, AcMode.HEAT)
+        room = Room('211', '大床房', 300, 25, FanSpeed.MEDIUM, AcMode.HEAT, initialTemperature=14)
+        db.session.add(room)
+        db.session.commit()
+    else:
+        # 如果房间已存在，根据需要决定是更新还是跳过
+        # 例如: room = existing_room
+        pass
+    existing_room = Room.query.filter_by(roomName='212').first()
+    if not existing_room:
+        room = Room('212', '大床房', 300, 25, FanSpeed.MEDIUM, AcMode.HEAT, initialTemperature=12)
+        db.session.add(room)
+        db.session.commit()
+    else:
+        # 如果房间已存在，根据需要决定是更新还是跳过
+        # 例如: room = existing_room
+        pass
+    existing_room = Room.query.filter_by(roomName='213').first()
+    if not existing_room:
+        room = Room('213', '大床房', 300, 25, FanSpeed.MEDIUM, AcMode.HEAT, initialTemperature=16)
+        db.session.add(room)
+        db.session.commit()
+    else:
+        # 如果房间已存在，根据需要决定是更新还是跳过
+        # 例如: room = existing_room
+        pass
+    existing_room = Room.query.filter_by(roomName='214').first()
+    if not existing_room:
+        room = Room('214', '大床房', 300, 25, FanSpeed.MEDIUM, AcMode.HEAT, initialTemperature=13)
+        db.session.add(room)
+        db.session.commit()
+    else:
+        # 如果房间已存在，根据需要决定是更新还是跳过
+        # 例如: room = existing_room
+        pass
+    existing_room = Room.query.filter_by(roomName='215').first()
+    if not existing_room:
+        room = Room('215', '大床房', 300, 25, FanSpeed.MEDIUM, AcMode.HEAT, initialTemperature=10)
         db.session.add(room)
         db.session.commit()
     else:
@@ -593,7 +615,6 @@ def room_create():
 
     :return:
     """
-    print(request.json['token'])
     origin_role = db.session.query(Account).filter_by(username=request.json['token']).one().role
     if origin_role != Role.manager:
         abort(401, "Unauthorized")
@@ -611,6 +632,8 @@ def room_create():
 
     return jsonify({"msg": "创建成功"}), 201
 
+def format(s):
+    return str(s).replace(',', '.')
 
 def room_info(room: Room, require_details=False, for_manager=True):
     if room is None:
@@ -625,26 +648,38 @@ def room_info(room: Room, require_details=False, for_manager=True):
             records = db.session.query(RoomRecord).filter_by(roomID=room.roomID).all()
     else:
         records = None
-    timeLeft = (datetime.now() - room.firstRuntime) / timedelta(
-        minutes=2) * scheduler.boost if room.firstRuntime is not None else None
+    timeLeft = (datetime.now() - room.firstRuntime) / timedelta(minutes=2) * scheduler.boost if room.firstRuntime is not None else None
     return dict(roomID=room.roomID, roomName=room.roomName, roomDescription=room.roomDescription,
                 roomTemperature=room.roomTemperature, timeLeft=timeLeft, unitPrice=room.unitPrice,
-                acTemperature=max(min(room.acTemperature, latest_settings.maxTemperature),
-                                  latest_settings.minTemperature),
+                acTemperature=max(min(room.acTemperature, latest_settings.maxTemperature), latest_settings.minTemperature),
                 fanSpeed=room.fanSpeed.value, acMode=latest_settings.acMode.value,
                 initialTemperature=room.initialTemperature, queueState=room.queueState.value,
                 minTemperature=latest_settings.minTemperature, maxTemperature=latest_settings.maxTemperature,
                 firstRunTime=room.firstRuntime, customerSessionID=room.customerSessionID, consumption=room.consumption,
-                checkInTime=room.checkInTime, occupied=room.customerSessionID is not None,
+                checkInTime=format(room.checkInTime), occupied=room.customerSessionID is not None,
+                currentTime=format(datetime.now()), days= 1,
                 roomDetails=[record_info(record) for record in records] if records is not None else None)
 
 
 def record_info(record: RoomRecord):
-    return dict(id=record.id, duration=record.serveEndTime - record.serveStartTime,
-                requestTime=record.requestTime, serveStartTime=record.serveStartTime, serveEndTime=record.serveEndTime,
+    print(1)
+    info = dict(id=record.id, duration=format(record.serveEndTime - record.serveStartTime) if record.serveStartTime is not None else None,
+                requestTime=format(record.requestTime), serveStartTime=format(record.serveStartTime), serveEndTime=format(record.serveEndTime),
                 fanSpeed=record.fanSpeed.value, acMode=record.acMode.value, rate=record.rate,
                 consumption=record.consumption, accumulatedConsumption=record.accumulatedConsumption)
-
+    return info
+def room_detai(token, roomName=None):
+    account_request = db.session.query(Account).filter_by(username=token).one()
+    room, role_request = account_request.room, account_request.role
+    if role_request != Role.manager and roomName is not None:
+        abort(404, "only manager can visit other rooms")
+    if role_request != Role.customer and roomName is None:
+        abort(404, f"{role_request.value} need param roomName")
+    room = room if role_request == Role.customer else db.session.query(Room).filter_by(roomName=roomName).one_or_none()
+    if room is None:
+        abort(404, f"room {roomName} not found")
+    roomInfo = room_info(room, require_details=True, for_manager=role_request == Role.manager)
+    return roomInfo
 
 def room_get(token, roomName=None):
     """
@@ -678,7 +713,6 @@ def room_get(token, roomName=None):
     room = room if role_request == Role.customer else db.session.query(Room).filter_by(roomName=roomName).one_or_none()
     if room is None:
         abort(404, f"room {roomName} not found")
-
     require_details = '/details/' in request.path
     roomInfo = room_info(room, require_details=require_details, for_manager=role_request == Role.manager)
     return roomInfo
@@ -723,7 +757,6 @@ def room_post(data, token, roomName=None):
         if data.get('acTemperature') and latest_settings.minTemperature < int(
                 data['acTemperature']) < latest_settings.maxTemperature:
             room.acTemperature = int(data['acTemperature'])
-            print(room.acTemperature)
         if data.get('fanSpeed'):
             if data['fanSpeed'] in FanSpeed.__dict__.keys():
                 room.fanSpeed = FanSpeed[data['fanSpeed']]
@@ -947,9 +980,10 @@ class hotel_data():
             'roomName': int(room_id)
         }
         print(data)
+        sale=self.check_room(int(room_id), token)
         response = account_delete(data, token)
         if response:
-            return True, self.check_room_expense(int(room_id), token)
+            return True, sale
         else:
             return False, None
 
@@ -966,7 +1000,7 @@ class hotel_data():
                                  )
         output = json.loads(response.content)['detail']
         for dict in output:
-            if (dict['roomNumber'] == '房间101'):
+            if dict['roomNumber'] == '房间101':
                 detial = dict
         print(detial)
 
@@ -978,12 +1012,11 @@ class hotel_data():
         return data
 
     def check_room_expense(self, room_id, token):
-        # response = requests.get(f'http://{PATH}/room-details/{int(room_id)}', headers=headers)
-        # if response.status_code != 200:
-        #     return []
-        # data = json.loads(response.content)['roomDetails']
-        return {'data':[1,2]}
-
+        return room_detai(token,room_id)
+    def check_room(self, room_id, token):
+        a=room_detai(token,room_id)
+        print(a)
+        return a
     def getoperate(self,name):
         """
         查看系统设置
@@ -1057,25 +1090,25 @@ def submit():
         password = request.args.get('password')
         roll = request.args.get('roll')
 
-    try:
+    # try:
         # 申请数据库对应的内容，返回字典与是否正确，不正确则弹出错误转到except部分
-        dic = log_data(username, password, roll)
-        print(dic.verification)
-        if dic.verification == True and dic.identify == True:
-            # 如果正确，则依据身份不同建立对应的session，包括房间号等
-            session['username'] = username
-            session['identification'] = roll
-            session['token'] = dic.token
-            if session['identification'] == '客户':
-                session['room_id'] = dic.room_id
-                return redirect(url_for('customer.homepage'))
-            else:
-                return redirect(url_for('hotel_receptionist.homepage'))
-        raise Exception("Verification failed")  # 只要工作做不成就报错转到except，成了直接返回走
+    dic = log_data(username, password, roll)
+    print(dic.verification)
+    if dic.verification == True and dic.identify == True:
+        # 如果正确，则依据身份不同建立对应的session，包括房间号等
+        session['username'] = username
+        session['identification'] = roll
+        session['token'] = dic.token
+        if session['identification'] == '客户':
+            session['room_id'] = dic.room_id
+            return redirect(url_for('customer.homepage'))
+        else:
+            return redirect(url_for('hotel_receptionist.homepage'))
+    raise Exception("Verification failed")  # 只要工作做不成就报错转到except，成了直接返回走
 
-    except:
-        #   出现查询不到对应内容，账号密码错误的时候弹到让这部分
-        return '账号密码不正确或网络错误'
+    # except:
+    #     #   出现查询不到对应内容，账号密码错误的时候弹到让这部分
+    #     return '账号密码不正确或网络错误'
 
 
 hotel_receptionist = Blueprint('hotel_receptionist', __name__)
