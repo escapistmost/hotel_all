@@ -54,6 +54,27 @@ class ACScheduler:
         else:
             return 1 / 3
 
+    def remove_from_lists(self, room):
+        if room.roomID in self.running_list:
+            self.running_list.remove(room.roomID)
+        self.waiting_queue = [(priority, t,  roomID) for priority, t, roomID in self.waiting_queue if roomID != room.roomID]
+
+    def initialize(self):
+        """
+        根据房间的状态恢复内存中的队列状态
+        """
+        with app.app_context():
+            rooms = self.db.session.query(Room).all()
+            for room in rooms:
+                if room.queueState == QueueState.PENDING:
+                    self.add_to_waiting(room)  # 初始化队列状态
+                elif room.queueState == QueueState.IDLE:
+                    self.remove_from_lists(room)
+                else:  # RUNNING
+                    self.add_to_waiting(room)  # 初始化队列状态
+                    room.queueState = QueueState.PENDING
+                    db.session.commit()
+
     def get_priority(self, acSpeed):
         # 根据空调速度返回优先级（高速度优先级最低）
         return {'high': 1, 'medium': 2, 'low': 3}.get(acSpeed.value, 3)
@@ -63,8 +84,8 @@ class ACScheduler:
         room.queueState = QueueState.PENDING
         db.session.commit()
         # 将房间信息添加到等待队列，并根据优先级和随机值排序
-        self.waiting_queue = [(priority, random.random(), room_id) for priority, random_val, room_id in
-                              self.waiting_queue]
+        # self.waiting_queue = [(priority, random.random(), room_id) for priority, random_val, room_id in
+        #                       self.waiting_queue]
         heapq.heappush(self.waiting_queue, (self.get_priority(room.fanSpeed), random.random(), room.roomID))
         if room.roomID in self.running_list:
             self.running_list.remove(room.roomID)
@@ -105,7 +126,8 @@ class ACScheduler:
                 # print(datetime.now() - room.firstRuntime)
                 if datetime.now() - room.firstRuntime > timedelta(minutes=2) / self.boost:  # 2分钟 / 6（性能提升系数）
                     print('over time!')
-                    self.add_to_waiting(room)
+                    self.add_to_waiting(room)  # 超时而暂停
+                    self.generate_record(room)  # 因超时暂停产生详单记录
 
             for room in rooms:
                 if room.queueState != QueueState.RUNNING:  # 空调关闭时
@@ -124,31 +146,41 @@ class ACScheduler:
                 room = self.db.session.query(Room).filter_by(roomID=roomID).one()
                 room.queueState = QueueState.RUNNING
                 room.firstRuntime = datetime.now()
+                room.startTimePoint = datetime.now()
                 db.session.commit()
                 self.running_list.append(roomID)
 
             self.last_update = t
 
+    def generate_record(self, room):
+        print(room)
+        latest_settings = db.session.query(Setting).order_by(Setting.createTime.desc()).first()
+        print(latest_settings)
+        record = RoomRecord(room.roomID, room.customerSessionID, room.requestTime, room.startTimePoint, datetime.now(), room.fanSpeed, room.acMode, latest_settings.rate, room.consumption - room.lastConsumption, room.consumption)
+        print(room.roomID, room.customerSessionID, room.requestTime, room.startTimePoint, datetime.now(), room.fanSpeed, room.acMode, latest_settings.rate, room.consumption - room.lastConsumption, room.consumption)
+        room.lastConsumption = room.consumption
+        print(room.lastConsumption,'?')
+        db.session.add(record)
+        db.session.commit()
+
     def turn_off(self, room):
         # 将房间的状态从PENDING/RUNNING切换到IDLE（关闭空调）
         room.queueState = QueueState.IDLE
         db.session.commit()
-        if room.roomID in self.running_list:
-            self.running_list.remove(room.roomID)
-        self.waiting_queue = [(priority, random_value, roomID) for priority, random_value, roomID in self.waiting_queue
-                              if roomID != room.roomID]
-        # 在这里产生详单记录（未提供代码示例）
+        self.remove_from_lists(room)
+        self.generate_record(room)  # 因用户操作关闭空调产生详单记录
         print('turn off!', room.queueState, self.running_list, self.waiting_queue)
 
     def turn_on(self, room):
         # 将房间的状态从IDLE切换到PENDING（打开空调）
         in_waiting = False
-        for p, random_value, id, in self.waiting_queue:
+        for p, t, id, in self.waiting_queue:
             if id == room.roomID:
                 in_waiting = True
-
+        room.requestTime = datetime.now()  # 添加请求时间
+        db.session.commit()
         if room.roomID not in self.running_list and not in_waiting:
-            self.add_to_waiting(room)
+            self.add_to_waiting(room)  # 开启空调而加入等待队列
         print('turn on!', room.queueState, self.running_list, self.waiting_queue)
 
     def schedule_wrapper(self):
@@ -212,7 +244,11 @@ class Room(db.Model):
     acMode = Column(Enum(AcMode))
     initialTemperature = Column(Float)
     queueState = Column(Enum(QueueState))
+
     firstRuntime = Column(DateTime, nullable=True)  # 在被调度为RUNNING态时必须指定
+    startTimePoint = Column(DateTime, nullable=True)  # 在空调调度为RUNNING态和空调风速改变时必须指定
+    requestTime = Column(DateTime, nullable=True)  # 在初次请求turn on时指定
+    lastConsumption = Column(Float)
 
     customerSessionID = Column(String, nullable=True)  # 在用户入住时必须指定
     checkInTime = Column(DateTime, nullable=True)  # 在用户入住时必须指定
@@ -245,19 +281,21 @@ class Room(db.Model):
         self.consumption = 0.0
         self.firstRuntime = None
         self.customerSessionID = None
+        self.lastConsumption = 0.0
+
 
 
 class RoomRecord(db.Model):
     __tablename__ = 'room_records'
     id = Column(Integer, primary_key=True)
     roomID = Column(Integer, ForeignKey('room.roomID'))
-    customSessionID = Column(String)
+    customerSessionID = Column(String)
     # 表会只保留过去3年的历史记录
     requestTime = Column(DateTime)
     serveStartTime = Column(DateTime)
     serveEndTime = Column(DateTime)
-    fanSpeed = Column(String)
-    acMode = Column(String)
+    fanSpeed = Column(Enum(FanSpeed))
+    acMode = Column(Enum(AcMode))
     rate = Column(Float)
     consumption = Column(Float)
     accumulatedConsumption = Column(Float)
@@ -324,15 +362,6 @@ with app.app_context():
         # 例如: account = existing_account
         pass
 
-    # 检查并添加第二个 Account
-    existing_account2 = Account.query.filter_by(username='111').first()
-    if not existing_account2:
-        account2 = Account('111', '111', Role.customer, room.roomID, '66666', '13w3252')
-        db.session.add(account2)
-    else:
-        # 如果账户已存在，根据需要决定是更新还是跳过
-        # 例如: account2 = existing_account2
-        pass
 
     # 添加 Setting
     settings = Setting(1., FanSpeed.MEDIUM, 25, 16, 30, AcMode.HEAT)
@@ -354,7 +383,7 @@ def create_account(data, account_id):
         # roomName (前台必选，管理员可选)
     :return:
     """
-    origin_account = db.session.query(Account).filter_by(accountID=account_id).one()
+    origin_account = db.session.query(Account).filter_by(username=account_id).one()
     if origin_account.role == Role.customer:
         abort(401, "Unauthorized")  # 客户无权限访问该api
 
@@ -591,7 +620,7 @@ def room_info(room: Room, require_details=False, for_manager=True):
     latest_settings = db.session.query(Setting).order_by(Setting.createTime.desc()).first()
     if require_details:
         if not for_manager:
-            records = db.session.query(RoomRecord).filter_by(customSessionID=room.customerSessionID).all()
+            records = db.session.query(RoomRecord).filter_by(customerSessionID=room.customerSessionID).all()
         else:
             records = db.session.query(RoomRecord).filter_by(roomID=room.roomID).all()
     else:
