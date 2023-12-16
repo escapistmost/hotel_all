@@ -1297,7 +1297,7 @@ def query_all_room_detail():
             return redirect(url_for('customer.homepage'))
         else:
             dic = hotel_data(session['username'])
-            rooms = dic.query_all_room()
+            rooms = dic.query_all_room(session['token'])
             return render_template('query_all_rooms.html', rooms=rooms)
 
     else:
