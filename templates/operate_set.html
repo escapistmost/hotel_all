@@ -68,9 +68,8 @@
 
         <label for="workMode">工作模式:</label>
         <select id="workMode" name="workMode">
-            {% for mode in work_modes %}
-            <option value="{{ mode }}">{{ mode }}</option>
-            {% endfor %}
+            <option value="COOL">COOL</option>
+            <option value="HEAT">HEAT</option>
         </select>
 
         <label for="rateLow">低风速费率:</label>
@@ -86,5 +85,23 @@
     </form>
 
     <button onclick="window.location.href='/receptionist/homepage'" style="width: 300px;">返回主页</button>
+    <script>
+        // 获取<select>元素的引用
+        var workModeSelect = document.getElementById("workMode");
+
+        // 设置默认选项的值，例如，将默认选项设置为"HEAT"
+        var defaultValue = "{{ default_mode }}";
+
+        // 遍历<select>元素中的每个<option>元素
+        for (var i = 0; i < workModeSelect.options.length; i++) {
+            // 如果<option>的value值等于默认值
+            if (workModeSelect.options[i].value === defaultValue) {
+                // 将该<option>元素设置为选中状态
+                workModeSelect.options[i].selected = true;
+                // 跳出循环，因为我们已经找到了默认选项
+                break;
+            }
+        }
+    </script>
 </body>
 </html>

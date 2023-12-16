@@ -525,7 +525,7 @@ def account_delete(data, token):
         # username 帐号删除, 管理员，只能删非客户帐号
     :return:
     """
-    origin_role = db.session.query(Account).filter_by(accountID=token).one().role
+    origin_role = db.session.query(Account).filter_by(username=token).one().role
     if origin_role == Role.customer:
         abort(401, "Unauthorized")  # 客户无权访问
 
@@ -781,8 +781,7 @@ def delete_room():
     return jsonify({"msg": "注销成功"}), 201
 
 
-@app.route('/settings', methods=['POST', 'GET'])
-def change_settings():
+def change_settings(data):
     """
     [管理员]
     查看和修改空调设置
@@ -795,25 +794,31 @@ def change_settings():
         # rate
     :return:
     """
-    account_request = db.session.query(Account).filter_by(accountID=request.json['token']).one()
+    account_request = db.session.query(Account).filter_by(username=data['token']).one()
     if account_request.role != Role.manager:
         abort(401, "Unauthorized")
 
-    if request.method == 'POST':
-        data = request.json
-        setting = Setting(rate=data['rate'], defaultFanSpeed=FanSpeed[data['defaultFanSpeed']],
-                          defaultTemperature=data['defaultTemperature'], acMode=data['acMode'],
-                          minTemperature=data['minTemperature'], maxTemperature=data['maxTemperature'])
-        db.session.add(setting)
-        db.session.commit()
-    else:
-        setting = db.session.query(Setting).order_by(Setting.createTime.desc()).first()
+    setting = Setting(rate=data['rate'], defaultFanSpeed=FanSpeed[data['defaultFanSpeed']],
+                      defaultTemperature=data['defaultTemperature'], acMode=data['acMode'],
+                      minTemperature=data['minTemperature'], maxTemperature=data['maxTemperature'])
+    db.session.add(setting)
+    db.session.commit()
 
-    return jsonify(settingID=setting.settingID, lastEditTime=setting.createTime, rate=setting.rate,
-                   defaultFanSpeed=setting.defaultFanSpeed,
-                   defaultTemperature=setting.defaultTemperature, minTemperature=setting.minTemperature,
-                   maxTemperature=setting.maxTemperature,
-                   acMode=setting.acMode), 201 if request.method == 'POST' else 200
+    return True
+
+
+def get_settings(name):
+    account_request = db.session.query(Account).filter_by(username=name).one()
+    if account_request.role != Role.manager:
+        abort(401, "Unauthorized")
+
+    setting = db.session.query(Setting).order_by(Setting.createTime.desc()).first()
+
+    return {'settingID': setting.settingID, 'lastEditTime': setting.createTime, 'rate': setting.rate,
+            'defaultFanSpeed': setting.defaultFanSpeed.value,
+            'defaultTemperature': setting.defaultTemperature, 'minTemperature': setting.minTemperature,
+            'maxTemperature': setting.maxTemperature,
+            'acMode': setting.acMode.value}
 PATH = '127.0.0.1:5000'  # '139.59.115.34:5000'
 
 
@@ -979,22 +984,40 @@ class hotel_data():
         # data = json.loads(response.content)['roomDetails']
         return {'data':[1,2]}
 
-    def getoperate(self):
+    def getoperate(self,name):
         """
         查看系统设置
         """
         temp_upper_limit = 10
         temp_lower_limit = 1
-        work_modes = ['制冷', '制热', '通风']
-        speed_rates = {'low': '0.5', 'medium': '0.75', 'high': '1.0'}
-        return temp_upper_limit, temp_lower_limit, work_modes, speed_rates
+        result = get_settings(name)
+        temp_upper_limit = result['maxTemperature']
+        temp_lower_limit = result['minTemperature']
+        work_mode = result['acMode']
+        rate = result['rate']
+        speed_rates = {'low': rate, 'medium': rate, 'high': rate}
+        print('get_mode:',work_mode)
+        return temp_upper_limit, temp_lower_limit, work_mode, speed_rates
 
-    def operate_set(self, temp_upper_limit, temp_lower_limit, work_mode, rate_low, rate_medium, rate_high):
+    def operate_set(self, token, temp_upper_limit, temp_lower_limit, work_mode, rate_low, rate_medium, rate_high):
         """
         依据传输的内容修改系统设置
         """
-        pass
-        return True
+
+        data = {
+            'token':token,
+            'rate':rate_low,
+            'defaultFanSpeed':'MEDIUM',
+            'defaultTemperature':24,
+            'acMode':work_mode,
+            'maxTemperature':temp_upper_limit,
+            'minTemperature':temp_lower_limit,
+        }
+        if change_settings(data=data):
+            print('更改成功')
+            return True
+        else:
+            return False
 
     def query_all_room(self, token):
         res = get_rooms(token)
@@ -1264,12 +1287,13 @@ def operate_set():
             dic = hotel_data(session['username'])
             if request.method == 'GET':
                 try:
-                    temp_upper_limit, temp_lower_limit, work_modes, speed_rates = dic.getoperate()
+                    temp_upper_limit, temp_lower_limit, work_modes, speed_rates = dic.getoperate(session['username'])
                     return render_template('operate_set.html',
                                            temp_upper_limit=temp_upper_limit,
                                            temp_lower_limit=temp_lower_limit,
-                                           work_modes=work_modes,
-                                           speed_rates=speed_rates)
+                                           default_mode=work_modes,
+                                           speed_rates=speed_rates
+                                           )
                 except:
                     return '网络/权限出现问题'
             else:
@@ -1282,7 +1306,7 @@ def operate_set():
                     rate_medium = request.form.get('rateMedium')
                     rate_high = request.form.get('rateHigh')
                     print(temp_upper_limit, temp_lower_limit, work_mode, rate_low, rate_medium, rate_high)
-                    if not dic.operate_set(temp_upper_limit, temp_lower_limit, work_mode, rate_low, rate_medium,
+                    if not dic.operate_set(session['username'],temp_upper_limit, temp_lower_limit, work_mode, rate_low, rate_medium,
                                            rate_high):
                         raise Exception("Verification failed")
                     return render_template('receptionist_homepage.html', name=session['username'])
